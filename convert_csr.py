@@ -55,10 +55,18 @@ def create_csr_graph_to_duckdb(
     con = duckdb.connect(output_db_path)
 
     try:
-        print("Step 0: Loading edges from original DB into new DB...")
+        print("Step 0: Loading edges and nodes from original DB into new DB...")
 
         # Import the edges table from the original database
         con.execute(f"ATTACH '{source_db_path}' AS orig;")
+
+        # Copy nodes table if it exists, with proper prefixing
+        try:
+            con.execute(f"CREATE TABLE {csr_table_name}_nodes AS SELECT * FROM orig.nodes;")
+            print(f"Nodes table copied from source database as {csr_table_name}_nodes")
+        except Exception as e:
+            print(f"Warning: Could not copy nodes table: {e}")
+            print("Continuing without nodes table...")
 
         # Handle limited edges for testing
         if limit_rels:

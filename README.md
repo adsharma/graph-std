@@ -66,11 +66,20 @@ Example:
 python convert_csr.py --source-db karate_random.duckdb --csr-table karate_random --output-db karate_csr.db
 ```
 
-This will create a CSR representation with four tables:
+This will create a CSR representation with five tables:
 - `{table_name}_node_mapping`: Maps original node IDs to contiguous indices
 - `{table_name}_indptr`: Array of size N+1 for row pointers
 - `{table_name}_indices`: Array of size E containing column indices
 - `{table_name}_metadata`: Graph metadata (node count, edge count, directed flag)
+- `{table_name}_nodes`: Original nodes table with node attributes (if any)
+
+This database can be further exported to a directory in parquet format as follows:
+
+```
+COPY database 'some-dir' (format 'parquet');
+```
+
+Proposal: use this directory as a standard for consuming graphs in other databases and applications.
 
 ## Format Details
 
@@ -107,3 +116,4 @@ A representation optimized for fast graph algorithms:
 - Row pointers (indptr): For each node, points to the start of its edges in the indices array
 - Column indices (indices): Contains the target node for each edge
 - Metadata: Stores graph properties (node count, edge count, directed flag)
+- Nodes: Original nodes table with node attributes (if any), prefixed with the table name
