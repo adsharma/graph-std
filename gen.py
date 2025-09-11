@@ -6,6 +6,9 @@ Script to dump the Karate Club graph from NetworkX to various formats:
 - SNAP (simple edge list format)
 - SNAP Binary (efficient binary format)
 - KuzuDB (nodes and edges in separate tables)
+
+This script also supports randomizing node IDs in a space that's 10x the size of
+the number of nodes in the graph.
 """
 
 import argparse
@@ -14,6 +17,7 @@ import csv
 import duckdb
 import kuzu
 import pandas as pd
+import random
 from snap_binary import export_networkx_to_snap
 
 
@@ -46,6 +50,43 @@ def load_graph(graph_type, size=None):
         return nx.scale_free_graph(size, seed=42)
     else:
         raise ValueError(f"Unsupported graph type: {graph_type}")
+
+
+def randomize_node_ids(graph):
+    """
+    Randomize node IDs in a space that's 10x the size of the number of nodes.
+
+    Args:
+        graph: NetworkX graph
+
+    Returns:
+        NetworkX graph with randomized node IDs
+    """
+    num_nodes = graph.number_of_nodes()
+    max_id_space = num_nodes * 10
+
+    # Generate unique random IDs for each node
+    original_nodes = list(graph.nodes())
+    random_ids = random.sample(range(max_id_space), num_nodes)
+
+    # Create mapping from original IDs to randomized IDs
+    id_mapping = dict(zip(original_nodes, random_ids))
+
+    # Create new graph with randomized IDs
+    if hasattr(graph, "to_directed"):
+        new_graph = graph.__class__()
+    else:
+        new_graph = nx.Graph()
+
+    # Add nodes with new IDs
+    for node in graph.nodes():
+        new_graph.add_node(id_mapping[node], **graph.nodes[node])
+
+    # Add edges with new IDs
+    for edge in graph.edges():
+        new_graph.add_edge(id_mapping[edge[0]], id_mapping[edge[1]])
+
+    return new_graph
 
 
 def export_to_csv(graph, prefix="karate"):
@@ -208,6 +249,11 @@ def main():
         type=int,
         help="Size of the graph (number of nodes for applicable graph types)",
     )
+    parser.add_argument(
+        "--randomize-ids",
+        action="store_true",
+        help="Randomize node IDs in a space 10x the number of nodes",
+    )
 
     args = parser.parse_args()
 
@@ -222,10 +268,20 @@ def main():
         f"Graph loaded: {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges"
     )
 
+    # Randomize node IDs if requested
+    if args.randomize_ids:
+        print("Randomizing node IDs...")
+        graph = randomize_node_ids(graph)
+        print(
+            f"Node IDs randomized: {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges"
+        )
+
     # Generate prefix for output files
     prefix = args.type
     if args.size:
         prefix += f"_{args.size}"
+    if args.randomize_ids:
+        prefix += "_random"
 
     print("Exporting to CSV...")
     export_to_csv(graph, prefix)
