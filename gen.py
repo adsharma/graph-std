@@ -97,11 +97,11 @@ def export_to_csv(graph, prefix="karate"):
         # Check if the graph has club attribute
         has_club = any("club" in data for node, data in graph.nodes(data=True))
         if has_club:
-            writer.writerow(["node_id", "club"])
+            writer.writerow(["id", "club"])
             for node, data in graph.nodes(data=True):
                 writer.writerow([node, data.get("club", "")])
         else:
-            writer.writerow(["node_id"])
+            writer.writerow(["id"])
             for node in graph.nodes():
                 writer.writerow([node])
 
@@ -128,10 +128,10 @@ def export_to_duckdb(graph, db_name="karate.duckdb"):
         nodes_data = [
             (node, data.get("club", "")) for node, data in graph.nodes(data=True)
         ]
-        nodes_df = pd.DataFrame(nodes_data, columns=["node_id", "club"])
+        nodes_df = pd.DataFrame(nodes_data, columns=["id", "club"])
     else:
         nodes_data = [(node,) for node in graph.nodes()]
-        nodes_df = pd.DataFrame(nodes_data, columns=["node_id"])
+        nodes_df = pd.DataFrame(nodes_data, columns=["id"])
 
     # Create edges dataframe
     edges_data = [(edge[0], edge[1]) for edge in graph.edges()]
@@ -199,23 +199,23 @@ def export_to_kuzudb(graph, db_name="karate_kuzu"):
     # Create nodes table
     if has_club:
         conn.execute(
-            "CREATE NODE TABLE nodes(node_id INT64, club STRING, PRIMARY KEY (node_id))"
+            "CREATE NODE TABLE nodes(id INT64, club STRING, PRIMARY KEY (id))"
         )
 
         # Create DataFrame for nodes
         nodes_data = [
             (node, data.get("club", "")) for node, data in graph.nodes(data=True)
         ]
-        nodes_df = pd.DataFrame(nodes_data, columns=["node_id", "club"])
+        nodes_df = pd.DataFrame(nodes_data, columns=["id", "club"])
 
         # Use COPY to efficiently load nodes from DataFrame
         conn.execute("COPY nodes FROM nodes_df")
     else:
-        conn.execute("CREATE NODE TABLE nodes(node_id INT64, PRIMARY KEY (node_id))")
+        conn.execute("CREATE NODE TABLE nodes(id INT64, PRIMARY KEY (id))")
 
         # Create DataFrame for nodes
         nodes_data = [(node,) for node in graph.nodes()]
-        nodes_df = pd.DataFrame(nodes_data, columns=["node_id"])
+        nodes_df = pd.DataFrame(nodes_data, columns=["id"])
 
         # Use COPY to efficiently load nodes from DataFrame
         conn.execute("COPY nodes FROM nodes_df")

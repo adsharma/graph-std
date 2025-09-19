@@ -107,26 +107,25 @@ def create_csr_graph_to_duckdb(
         print("Step 1: Creating id_mapping for contiguous node IDs...")
 
         # Create mapping from original IDs to 0-based contiguous IDs - rename to match existing schema
+        # The order of columns is significant: csr_index first, original_node_id second
         con.execute(
             f"""
             CREATE TABLE {csr_table_name}_node_mapping AS
             SELECT 
-                node AS original_node_id,
-                row_number() OVER (ORDER BY node) - 1 AS csr_index
+                row_number() OVER (ORDER BY node) - 1 AS csr_index,
+                node AS original_node_id
             FROM (
                 SELECT DISTINCT source AS node FROM relations
                 UNION
                 SELECT DISTINCT target AS node FROM relations
             )
+            ORDER BY csr_index;
         """
         )
 
-        # Index for fast lookup
+        # Index for fast lookup by original_id
         con.execute(
             f"CREATE UNIQUE INDEX idx_orig_id ON {csr_table_name}_node_mapping(original_node_id);"
-        )
-        con.execute(
-            f"CREATE UNIQUE INDEX idx_mapped_id ON {csr_table_name}_node_mapping(csr_index);"
         )
 
         result = con.execute(
@@ -192,7 +191,7 @@ def create_csr_graph_to_duckdb(
             CREATE OR REPLACE TABLE {csr_table_name}_indptr AS
             SELECT 0::BIGINT AS ptr  -- First element is 0
             UNION ALL
-            SELECT ptr FROM {csr_table_name}_indptr
+            SELECT ptr::int64 FROM {csr_table_name}_indptr
             ORDER BY ptr;
         """
         )
@@ -212,7 +211,7 @@ def create_csr_graph_to_duckdb(
         con.execute(
             f"""
             CREATE TABLE {csr_table_name}_indices AS
-            SELECT dst AS target
+            SELECT dst AS target, 1.0::double as weight
             FROM relations_mapped
             ORDER BY src, dst;
         """
