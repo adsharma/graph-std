@@ -29,9 +29,38 @@ Usage Examples:
 """
 
 import argparse
+import re
 from pathlib import Path
 
 import duckdb
+
+
+def parse_schema_cypher(schema_path: Path) -> dict:
+    """
+    Parse schema.cypher to extract edge relationships (FROM/TO node types).
+
+    Returns:
+        Dictionary mapping edge names to (from_node_type, to_node_type) tuples
+    """
+    edge_relationships = {}
+
+    if not schema_path.exists():
+        return edge_relationships
+
+    content = schema_path.read_text()
+
+    # Parse REL TABLE definitions: CREATE REL TABLE Follows(FROM User TO User, ...);
+    # Also handles backtick-quoted identifiers: CREATE REL TABLE `edges` (FROM `nodes` TO `nodes`, ...)
+    rel_pattern = (
+        r"CREATE\s+REL\s+TABLE\s+`?(\w+)`?\s*\(\s*FROM\s+`?(\w+)`?\s+TO\s+`?(\w+)`?"
+    )
+    for match in re.finditer(rel_pattern, content, re.IGNORECASE):
+        edge_name = match.group(1).lower()
+        from_node = match.group(2).lower()
+        to_node = match.group(3).lower()
+        edge_relationships[edge_name] = (from_node, to_node)
+
+    return edge_relationships
 
 
 def get_node_and_edge_tables(
@@ -93,6 +122,8 @@ def generate_schema_cypher(
     node_tables: list[str],
     edge_tables: list[str],
     parquet_dir: Path,
+    edge_relationships: dict,
+    node_type_to_table: dict,
 ) -> str:
     """
     Generate schema.cypher content for ladybugdb.
@@ -149,7 +180,8 @@ def generate_schema_cypher(
             cols_str = ", ".join(col_defs)
             display_name = node_display_names[node_table]
             lines.append(
-                f"CREATE NODE TABLE {display_name}({cols_str}, PRIMARY KEY({pk_col})) WITH (storage = '{storage_path}');"
+                f"CREATE NODE TABLE {display_name}({cols_str}, PRIMARY KEY({pk_col})) "
+                f"WITH (storage = '{storage_path}');"
             )
         except Exception as e:
             print(
@@ -158,18 +190,41 @@ def generate_schema_cypher(
 
     # Generate REL TABLE definitions for each edge table
     for edge_table in edge_tables:
-        # Determine source and target node tables
-        if node_tables:
-            src_table = node_display_names[node_tables[0]]
-            dst_table = src_table
-        else:
-            src_table = "nodes"
-            dst_table = "nodes"
-
         rel_name = get_edge_display_name(edge_table)
-        lines.append(
-            f"CREATE REL TABLE {rel_name}(FROM {src_table} TO {dst_table}, weight DOUBLE) WITH (storage = '{storage_path}');"
-        )
+        edge_name = edge_table[6:] if edge_table.startswith("edges_") else edge_table
+        src_node_type, dst_node_type = edge_relationships.get(edge_name, (None, None))
+        if (
+            src_node_type
+            and dst_node_type
+            and src_node_type in node_type_to_table
+            and dst_node_type in node_type_to_table
+        ):
+            src_nt = node_type_to_table[src_node_type]
+            dst_nt = node_type_to_table[dst_node_type]
+            src_table = node_display_names[src_nt]
+            dst_table = node_display_names[dst_nt]
+        else:
+            src_table = node_display_names[node_tables[0]] if node_tables else "nodes"
+            dst_table = src_table
+
+        # Get columns from indices table
+        indices_table = f"{csr_table_name}_indices_{edge_name}"
+        try:
+            cols = con.execute(f"DESCRIBE {indices_table}").fetchall()
+            col_defs = []
+            for col in cols:
+                col_name, col_type = col[0], col[1]
+                if col_name == "target":
+                    continue
+                cypher_type = duckdb_type_to_cypher_type(col_type)
+                col_defs.append(f"{col_name} {cypher_type}")
+            props_str = ", ".join(col_defs)
+            lines.append(
+                f"CREATE REL TABLE {rel_name}(FROM {src_table} TO {dst_table}"
+                f"{', ' + props_str if props_str else ''}) WITH (storage = '{storage_path}');"
+            )
+        except Exception as e:
+            print(f"Warning: Could not generate schema for rel table {rel_name}: {e}")
 
     return "\n".join(lines) + "\n"
 
@@ -180,6 +235,8 @@ def export_to_parquet_and_cypher(
     csr_table_name: str,
     node_tables: list[str],
     edge_tables: list[str],
+    edge_relationships: dict,
+    node_type_to_table: dict,
 ) -> None:
     """
     Export all tables to parquet format and generate schema.cypher.
@@ -212,7 +269,13 @@ def export_to_parquet_and_cypher(
 
     # Generate schema.cypher
     schema_cypher = generate_schema_cypher(
-        con, csr_table_name, node_tables, edge_tables, parquet_dir
+        con,
+        csr_table_name,
+        node_tables,
+        edge_tables,
+        parquet_dir,
+        edge_relationships,
+        node_type_to_table,
     )
     schema_file = parquet_dir / "schema.cypher"
     schema_file.write_text(schema_cypher)
@@ -236,6 +299,7 @@ def create_csr_graph_to_duckdb(
     csr_table_name: str = "csr_graph",
     node_table: str | None = None,
     edge_table: str | None = None,
+    schema_path: str | None = None,
 ) -> None:
     """
     Create CSR graph data and save to DuckDB using optimized SQL approach.
@@ -248,6 +312,7 @@ def create_csr_graph_to_duckdb(
         csr_table_name: Name of table to store CSR data
         node_table: Specific node table to use (default: auto-discover)
         edge_table: Specific edge table to use (default: auto-discover)
+        schema_path: Path to schema.cypher for edge relationship info
     """
     print("\n=== Creating CSR Graph Data (Optimized SQL Approach) ===")
 
@@ -277,228 +342,279 @@ def create_csr_graph_to_duckdb(
         print(f"Discovered node tables: {node_tables}")
         print(f"Discovered edge tables: {edge_tables}")
 
-        # Copy all node tables with proper prefixing
+        # Parse schema.cypher for edge relationships
+        edge_relationships = {}
+        if schema_path:
+            schema_file = Path(schema_path)
+            edge_relationships = parse_schema_cypher(schema_file)
+            print(f"Parsed edge relationships from schema: {edge_relationships}")
+
+        # Build mapping from node type names to table names
+        # e.g., "user" -> "nodes_user", "city" -> "nodes_city"
+        node_type_to_table = {}
+        for nt in node_tables:
+            if nt == "nodes":
+                node_type_to_table["nodes"] = nt
+            elif nt.startswith("nodes_"):
+                node_type_name = nt[6:]  # Remove "nodes_" prefix
+                node_type_to_table[node_type_name] = nt
+
+        print(f"Node type to table mapping: {node_type_to_table}")
+
+        # Copy all node tables with proper prefixing and create per-table mappings
+        node_counts = {}  # Track node counts per table
         for nt in node_tables:
             try:
                 con.execute(
                     f"CREATE TABLE {csr_table_name}_{nt} AS SELECT * FROM orig.{nt};"
                 )
                 print(f"  Copied node table: {nt} -> {csr_table_name}_{nt}")
+
+                # Get the primary key column (first column of node table)
+                cols = con.execute(f"DESCRIBE {csr_table_name}_{nt}").fetchall()
+                pk_col = cols[0][0] if cols else "id"
+
+                # Create per-table node mapping
+                node_type = nt[6:] if nt.startswith("nodes_") else nt
+                mapping_table = f"{csr_table_name}_mapping_{node_type}"
+                con.execute(
+                    f"""
+                    CREATE TABLE {mapping_table} AS
+                    SELECT
+                        row_number() OVER (ORDER BY {pk_col}) - 1 AS csr_index,
+                        {pk_col} AS original_node_id
+                    FROM {csr_table_name}_{nt}
+                    ORDER BY csr_index;
+                """
+                )
+                print(f"  Created node mapping: {mapping_table}")
+
+                # Track node count
+                result = con.execute(
+                    f"SELECT COUNT(*) FROM {csr_table_name}_{nt}"
+                ).fetchone()
+                node_counts[nt] = result[0] if result else 0
             except Exception as e:
                 print(f"Warning: Could not copy node table {nt}: {e}")
 
-        # Build combined relations from all edge tables
-        relations_queries = []
+        # Process each edge table separately to create per-edge CSR structures
+        print("\nStep 1: Building per-edge-table CSR structures...")
+
         for et in edge_tables:
+            # Determine source and target node types from schema
+            edge_name = (
+                et[6:] if et.startswith("edges_") else et
+            )  # Remove "edges_" prefix
+            src_node_type, dst_node_type = edge_relationships.get(
+                edge_name, (None, None)
+            )
+
+            # Find the corresponding node tables
+            src_table = node_type_to_table.get(src_node_type)
+            dst_table = node_type_to_table.get(dst_node_type)
+
+            fallback_node_type = None
+            if src_table and dst_table:
+                src_mapping = f"{csr_table_name}_mapping_{src_node_type}"
+                dst_mapping = f"{csr_table_name}_mapping_{dst_node_type}"
+                num_src_nodes = node_counts.get(src_table, 0)
+                print(
+                    f"\n  Processing {et}: {src_node_type} ({num_src_nodes} nodes) -> {dst_node_type}"
+                )
+            else:
+                # Fallback: use first node table for both
+                fallback_table = node_tables[0] if node_tables else "nodes"
+                fallback_node_type = (
+                    fallback_table[6:]
+                    if fallback_table.startswith("nodes_")
+                    else fallback_table
+                )
+                src_mapping = f"{csr_table_name}_mapping_{fallback_node_type}"
+                dst_mapping = src_mapping
+                num_src_nodes = node_counts.get(fallback_table, 0)
+                print(f"\n  Processing {et}: using fallback mapping {src_mapping}")
+
+            # Get edge columns excluding source and target
+            edge_cols_result = con.execute(f"DESCRIBE orig.{et}").fetchall()
+            edge_col_names = [col[0] for col in edge_cols_result]
+            edge_cols = [c for c in edge_col_names if c not in ["source", "target"]]
+
+            # Prepare select column strings
+            select_cols = "m1.csr_index AS csr_source, m2.csr_index AS csr_target"
+            if edge_cols:
+                select_cols += ", " + ", ".join([f"e.{c}" for c in edge_cols])
+            reverse_select_cols = (
+                "m2.csr_index AS csr_source, m1.csr_index AS csr_target"
+            )
+            if edge_cols:
+                reverse_select_cols += ", " + ", ".join([f"e.{c}" for c in edge_cols])
+            reverse_cols = "csr_target AS csr_source, csr_source AS csr_target"
+            if edge_cols:
+                reverse_cols += ", " + ", ".join(edge_cols)
+
+            # Create relations table for this edge type
             if limit_rels:
                 limit_per_table = limit_rels // len(edge_tables)
                 if directed:
-                    relations_queries.append(
-                        f"SELECT source, target FROM orig.{et} WHERE source != target LIMIT {limit_per_table}"
-                    )
+                    rel_query = f"""
+                        SELECT {select_cols}
+                        FROM orig.{et} e
+                        JOIN {src_mapping} m1 ON e.source = m1.original_node_id
+                        JOIN {dst_mapping} m2 ON e.target = m2.original_node_id
+                        WHERE e.source != e.target
+                        LIMIT {limit_per_table}
+                    """
                 else:
-                    relations_queries.append(
-                        f"""
+                    rel_query = f"""
                         WITH limited AS (
-                            SELECT source, target FROM orig.{et} WHERE source != target LIMIT {limit_per_table}
+                            SELECT {select_cols}
+                            FROM orig.{et} e
+                            JOIN {src_mapping} m1 ON e.source = m1.original_node_id
+                            JOIN {dst_mapping} m2 ON e.target = m2.original_node_id
+                            WHERE e.source != e.target
+                            LIMIT {limit_per_table}
                         )
-                        SELECT source, target FROM limited
+                        SELECT * FROM limited
                         UNION ALL
-                        SELECT target AS source, source AS target FROM limited
-                        """
-                    )
+                        SELECT {reverse_cols} FROM limited
+                    """
             else:
                 if directed:
-                    relations_queries.append(
-                        f"SELECT source, target FROM orig.{et} WHERE source != target"
-                    )
+                    rel_query = f"""
+                        SELECT {select_cols}
+                        FROM orig.{et} e
+                        JOIN {src_mapping} m1 ON e.source = m1.original_node_id
+                        JOIN {dst_mapping} m2 ON e.target = m2.original_node_id
+                        WHERE e.source != e.target
+                    """
                 else:
-                    relations_queries.append(
-                        f"""
-                        SELECT source, target FROM orig.{et} WHERE source != target
+                    rel_query = f"""
+                        SELECT {select_cols}
+                        FROM orig.{et} e
+                        JOIN {src_mapping} m1 ON e.source = m1.original_node_id
+                        JOIN {dst_mapping} m2 ON e.target = m2.original_node_id
+                        WHERE e.source != e.target
                         UNION ALL
-                        SELECT target AS source, source AS target FROM orig.{et} WHERE source != target
-                        """
-                    )
+                        SELECT {reverse_select_cols}
+                        FROM orig.{et} e
+                        JOIN {src_mapping} m1 ON e.source = m1.original_node_id
+                        JOIN {dst_mapping} m2 ON e.target = m2.original_node_id
+                        WHERE e.source != e.target
+                    """
 
-        # Combine all edge tables
-        combined_query = " UNION ALL ".join(f"({q})" for q in relations_queries)
-        con.execute(f"CREATE TABLE relations AS {combined_query};")
+            con.execute(f"CREATE TABLE relations_{edge_name} AS {rel_query};")
 
-        if limit_rels:
-            print(
-                f"Using limited dataset: ~{limit_rels} edges total across {len(edge_tables)} edge table(s)"
-            )
+            result = con.execute(
+                f"SELECT COUNT(*) FROM relations_{edge_name}"
+            ).fetchone()
+            edge_count = result[0] if result else 0
+            print(f"    Edges: {edge_count:,}")
 
-        print("Step 1: Creating id_mapping for contiguous node IDs...")
-
-        # Create mapping from original IDs to 0-based contiguous IDs - rename to match existing schema
-        # The order of columns is significant: csr_index first, original_node_id second
-        con.execute(
-            f"""
-            CREATE TABLE {csr_table_name}_node_mapping AS
-            SELECT
-                row_number() OVER (ORDER BY node) - 1 AS csr_index,
-                node AS original_node_id
-            FROM (
-                SELECT DISTINCT source AS node FROM relations
-                UNION
-                SELECT DISTINCT target AS node FROM relations
-            )
-            ORDER BY csr_index;
-        """
-        )
-
-        # Index for fast lookup by original_id
-        con.execute(
-            f"CREATE UNIQUE INDEX idx_orig_id ON {csr_table_name}_node_mapping(original_node_id);"
-        )
-
-        result = con.execute(
-            f"SELECT COUNT(*) FROM {csr_table_name}_node_mapping"
-        ).fetchone()
-        num_nodes = result[0] if result else 0
-        print(f"Number of unique nodes: {num_nodes:,}")
-
-        print("Step 2: Mapping edges to contiguous IDs...")
-
-        con.execute(
+            # Build CSR indptr for this edge type
+            indptr_table = f"{csr_table_name}_indptr_{edge_name}"
+            con.execute(
+                f"""
+                CREATE TABLE {indptr_table} AS
+                WITH node_range AS (
+                    SELECT unnest(range(0, {num_src_nodes})) AS node_id
+                ),
+                degrees AS (
+                    SELECT csr_source AS src, COUNT(*) AS deg
+                    FROM relations_{edge_name}
+                    GROUP BY csr_source
+                ),
+                cumulative AS (
+                    SELECT
+                        node_range.node_id,
+                        COALESCE(SUM(degrees.deg) OVER (ORDER BY node_range.node_id ROWS UNBOUNDED PRECEDING), 0) AS ptr
+                    FROM node_range
+                    LEFT JOIN degrees ON node_range.node_id = degrees.src
+                )
+                SELECT ptr FROM cumulative
+                ORDER BY node_id;
             """
-            CREATE TABLE relations_mapped AS
-            SELECT
-                m1.csr_index AS src,
-                m2.csr_index AS dst
-            FROM relations
-            JOIN {}_node_mapping m1 ON relations.source = m1.original_node_id
-            JOIN {}_node_mapping m2 ON relations.target = m2.original_node_id
-        """.format(
-                csr_table_name, csr_table_name
             )
-        )
 
-        result = con.execute("SELECT COUNT(*) FROM relations_mapped").fetchone()
-        total_edges = result[0] if result else 0
-        print(f"Total edges: {total_edges:,}")
-
-        print("Step 3: Building csr_indptr (size: num_nodes + 1)...")
-
-        # Build row_ptr: cumulative sum of degrees, including node IDs with zero degree
-        con.execute(
-            f"""
-            CREATE TABLE {csr_table_name}_indptr AS
-            WITH node_range AS (
-                SELECT unnest(range(0, {num_nodes})) AS node_id
-            ),
-            degrees AS (
-                SELECT src, COUNT(*) AS deg
-                FROM relations_mapped
-                GROUP BY src
-            ),
-            cumulative AS (
-                SELECT
-                    node_range.node_id,
-                    COALESCE(SUM(degrees.deg) OVER (ORDER BY node_range.node_id ROWS UNBOUNDED PRECEDING), 0) AS ptr
-                FROM node_range
-                LEFT JOIN degrees ON node_range.node_id = degrees.src
+            # Recreate with leading zero
+            con.execute(
+                f"""
+                CREATE OR REPLACE TABLE {indptr_table} AS
+                SELECT 0::BIGINT AS ptr
+                UNION ALL
+                SELECT ptr::int64 FROM {indptr_table}
+                ORDER BY ptr;
+            """
             )
-            SELECT ptr FROM cumulative
-            ORDER BY node_id;
 
-            -- Now prepend a 0 and append the last ptr again? No — we want:
-            -- row_ptr[0] = 0
-            -- row_ptr[i] = cumulative degree up to node i-1
-            -- So we insert 0 at the beginning
-        """
-        )
+            result = con.execute(f"SELECT COUNT(*) FROM {indptr_table}").fetchone()
+            indptr_size = result[0] if result else 0
+            print(f"    indptr: {indptr_size} entries")
 
-        # Recreate csr_indptr with leading zero
+            # Build CSR indices for this edge type
+            indices_table = f"{csr_table_name}_indices_{edge_name}"
+            con.execute(
+                f"""
+                CREATE TABLE {indices_table} AS
+                SELECT csr_target AS target{', ' + ', '.join(edge_cols) if edge_cols else ''}
+                FROM relations_{edge_name}
+                ORDER BY csr_source, csr_target;
+            """
+            )
+
+            result = con.execute(f"SELECT COUNT(*) FROM {indices_table}").fetchone()
+            indices_size = result[0] if result else 0
+            print(f"    indices: {indices_size} entries")
+
+            # Drop temporary relations table
+            con.execute(f"DROP TABLE IF EXISTS relations_{edge_name};")
+
+        # Count total nodes and edges for summary
+        total_nodes = sum(node_counts.values())
+        total_edges = 0
+        for et in edge_tables:
+            edge_name = et[6:] if et.startswith("edges_") else et
+            result = con.execute(
+                f"SELECT COUNT(*) FROM {csr_table_name}_indices_{edge_name}"
+            ).fetchone()
+            total_edges += result[0] if result else 0
+
+        # Create global metadata
         con.execute(
             f"""
-            CREATE OR REPLACE TABLE {csr_table_name}_indptr AS
-            SELECT 0::BIGINT AS ptr  -- First element is 0
-            UNION ALL
-            SELECT ptr::int64 FROM {csr_table_name}_indptr
-            ORDER BY ptr;
+        CREATE TABLE {csr_table_name}_metadata AS
+        SELECT {total_nodes} AS n_nodes, {total_edges} AS n_edges, {directed} AS directed
         """
         )
 
-        # Validate size
-        result = con.execute(f"SELECT COUNT(*) FROM {csr_table_name}_indptr").fetchone()
-        indptr_size = result[0] if result else 0
-        assert (
-            indptr_size == num_nodes + 1
-        ), f"csr_indptr should have {num_nodes + 1} entries, got {indptr_size}"
+        # List per-table node mappings for output
+        node_mapping_tables = [
+            f"{csr_table_name}_mapping_{nt[6:] if nt.startswith('nodes_') else nt}"
+            for nt in node_tables
+        ]
 
-        print(f"csr_indptr created with {indptr_size} entries.")
+        print("\n✅ CSR format built and cleaned up. Final tables:")
+        for mapping_table in node_mapping_tables:
+            print(f"  - {mapping_table} (orig_id → mapped_id)")
+        for i, et in enumerate(edge_tables):
+            edge_name = et[6:] if et.startswith("edges_") else et
+            print(f"  - {csr_table_name}_indptr_{edge_name}")
+            print(f"  - {csr_table_name}_indices_{edge_name}")
+        print(f"  - {csr_table_name}_metadata (global)")
 
-        print("Step 4: Building csr_indices (sorted by src, then dst)...")
-
-        # Create the column index array
-        con.execute(
-            f"""
-            CREATE TABLE {csr_table_name}_indices AS
-            SELECT dst AS target, 1.0::double as weight
-            FROM relations_mapped
-            ORDER BY src, dst;
-        """
+        print(
+            f"\n✓ Built CSR format: {total_nodes} nodes, {total_edges} edges across {len(edge_tables)} edge types"
         )
-
-        result = con.execute(
-            f"SELECT COUNT(*) FROM {csr_table_name}_indices"
-        ).fetchone()
-        indices_size = result[0] if result else 0
-        assert indices_size == total_edges, "csr_indices count mismatch"
-
-        print(f"csr_indices created with {indices_size} entries.")
-
-        print("Step 5: Creating metadata table...")
-
-        # Create metadata table to match existing schema
-        con.execute(
-            f"""
-            CREATE TABLE {csr_table_name}_metadata AS
-            SELECT
-                {num_nodes} AS n_nodes,
-                {total_edges} AS n_edges,
-                {directed} AS directed
-        """
-        )
-
-        print("Step 6: Dropping temporary tables and indices...")
-
-        # Drop intermediate tables
-        con.execute("DROP TABLE IF EXISTS relations;")
-        con.execute("DROP TABLE IF EXISTS relations_mapped;")
-
-        # Drop indices
-        con.execute("DROP INDEX IF EXISTS idx_orig_id;")
-        con.execute("DROP INDEX IF EXISTS idx_mapped_id;")
-
-        print("✅ CSR format built and cleaned up. Final tables:")
-        print(f"  - {csr_table_name}_node_mapping (orig_id → mapped_id)")
-        print(f"  - {csr_table_name}_indptr (array of size N+1)")
-        print(f"  - {csr_table_name}_indices (array of size E)")
-        print(f"  - {csr_table_name}_metadata (graph metadata)")
-
-        # Optional: Quick validation
-        result0 = con.execute(
-            f"SELECT ptr FROM {csr_table_name}_indptr ORDER BY ptr LIMIT 1"
-        ).fetchone()
-        r0 = result0[0] if result0 else 0
-        resultN = con.execute(
-            f"SELECT ptr FROM {csr_table_name}_indptr ORDER BY ptr DESC LIMIT 1"
-        ).fetchone()
-        rN = resultN[0] if resultN else 0
-        print(f"csr_indptr[0] = {r0}, csr_indptr[N] = {rN}")
-        if rN == total_edges:
-            print("✔️  CSR structure validated: last ptr == total edges")
-
-        print(f"✓ Built CSR format: {num_nodes} nodes, {total_edges} edges")
         print(f"✓ Saved CSR graph data to {output_db_path}")
 
         # Export to parquet and generate schema.cypher
         export_to_parquet_and_cypher(
-            con, output_db_path, csr_table_name, node_tables, edge_tables
+            con,
+            output_db_path,
+            csr_table_name,
+            node_tables,
+            edge_tables,
+            edge_relationships,
+            node_type_to_table,
         )
 
     except Exception as e:
@@ -559,6 +675,12 @@ def main():
         action="store_true",
         help="Treat graph as directed (default: undirected)",
     )
+    parser.add_argument(
+        "--schema",
+        type=str,
+        default=None,
+        help="Path to schema.cypher for edge relationship info (FROM/TO node types)",
+    )
 
     args = parser.parse_args()
 
@@ -583,6 +705,8 @@ def main():
         print(f"Node table filter: {args.node_table}")
     if args.edge_table:
         print(f"Edge table filter: {args.edge_table}")
+    if args.schema:
+        print(f"Schema file: {args.schema}")
 
     create_csr_graph_to_duckdb(
         source_db_path=source_db_path,
@@ -592,6 +716,7 @@ def main():
         csr_table_name=args.csr_table,
         node_table=args.node_table,
         edge_table=args.edge_table,
+        schema_path=args.schema,
     )
 
     print("\n=== Conversion Completed Successfully! ===")
