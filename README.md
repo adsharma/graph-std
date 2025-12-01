@@ -2,7 +2,7 @@
 
 This project provides tools to convert graph data from simple DuckDB databases or Parquet files containing `nodes_*` and `edges_*` tables, along with a `schema.cypher` file, into standardized graph formats for efficient processing.
 
-## Converting to CSR Format
+## Sample Usage
 
 ```bash
 uv run python convert_csr.py \
