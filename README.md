@@ -117,3 +117,39 @@ All data saved to: demo-db_csr.duckdb
 ```
 
 You'll get a demo-db_csr.duckdb AND the object storage ready representation aka graph-std.
+
+## Verification
+
+You can verify that the conversion went ok by running `scan.py`. It's also a good way to understand the graph-std format.
+
+```
+uv run scan.py --input demo-db_csr --prefix demo
+Metadata: 7 nodes, 8 edges, directed=True
+
+Node Tables:
+
+Table: demo_nodes_user
+(100, 'Adam', 30)
+(250, 'Karissa', 40)
+(75, 'Noura', 25)
+(300, 'Zhang', 50)
+
+Table: demo_nodes_city
+(500, 'Guelph', 75000)
+(600, 'Kitchener', 200000)
+(700, 'Waterloo', 150000)
+
+Edge Tables (reconstructed from CSR):
+
+Table: follows (FROM user TO user)
+(100, 250, 2020)
+(100, 300, 2020)
+(250, 300, 2021)
+(300, 75, 2022)
+
+Table: livesin (FROM user TO city)
+(75, 500)
+(100, 700)
+(250, 700)
+(300, 600)
+```
