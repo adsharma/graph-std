@@ -373,14 +373,14 @@ def create_csr_graph_to_duckdb(
         node_counts = {}  # Track node counts per table
         for nt in node_tables:
             try:
+                # Get the primary key column (first column of original node table)
+                cols = con.execute(f"DESCRIBE orig.{nt}").fetchall()
+                pk_col = cols[0][0] if cols else "id"
+
                 con.execute(
-                    f"CREATE TABLE {csr_table_name}_{nt} AS SELECT * FROM orig.{nt};"
+                    f"CREATE TABLE {csr_table_name}_{nt} AS SELECT * FROM orig.{nt} ORDER BY {pk_col};"
                 )
                 print(f"  Copied node table: {nt} -> {csr_table_name}_{nt}")
-
-                # Get the primary key column (first column of node table)
-                cols = con.execute(f"DESCRIBE {csr_table_name}_{nt}").fetchall()
-                pk_col = cols[0][0] if cols else "id"
 
                 # Create per-table node mapping
                 node_type = nt[6:] if nt.startswith("nodes_") else nt

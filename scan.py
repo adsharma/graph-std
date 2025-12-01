@@ -74,6 +74,47 @@ def scan_graph_std(input_dir: Path, prefix: str, schema_path: Path | None = None
             for row in rows:
                 print(row)
 
+        # Verify CSR index == node offset invariant
+        print("\nVerifying CSR index == node offset invariant:")
+        for np in node_parquets:
+            nt = np.stem
+            # Extract node type: prefix_nodes[_type]
+            if nt.startswith(f"{prefix}_nodes"):
+                suffix = nt[len(f"{prefix}_nodes") :]
+                if suffix == "":
+                    node_type = "nodes"
+                else:
+                    node_type = suffix[1:]  # remove leading _
+                mapping_p = input_dir / f"{prefix}_mapping_{node_type}.parquet"
+                if mapping_p.exists():
+                    # Load node rows
+                    node_rows = con.execute(f"SELECT * FROM '{np}'").fetchall()
+                    # Load mapping ordered by csr_index
+                    mapping = con.execute(
+                        f"SELECT original_node_id FROM '{mapping_p}' ORDER BY csr_index"
+                    ).fetchall()
+                    mapping_ids = [row[0] for row in mapping]
+                    # Assume pk is first column
+                    pk_values = [row[0] for row in node_rows]
+                    if len(pk_values) != len(mapping_ids):
+                        print(
+                            f"  {nt}: Length mismatch: {len(pk_values)} vs {len(mapping_ids)}"
+                        )
+                        continue
+                    violations = [
+                        i
+                        for i in range(len(pk_values))
+                        if pk_values[i] != mapping_ids[i]
+                    ]
+                    if violations:
+                        print(
+                            f"  {nt}: Invariant violated at rows {violations[:5]}{'...' if len(violations) > 5 else ''}"
+                        )
+                    else:
+                        print(f"  {nt}: Invariant holds ✓")
+                else:
+                    print(f"  {nt}: No mapping file found")
+
         # Edge tables - reconstruct from CSR
         print("\nEdge Tables (reconstructed from CSR):")
 
