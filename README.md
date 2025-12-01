@@ -21,6 +21,6 @@ This will create a CSR representation with multiple tables depending on the numb
 - `{table_name}_metadata`: Global graph metadata (node count, edge count, directed flag)
 - `schema.cypher`: A cypher schema that a graph database can mount without ingesting
 
-## More information about graph-std and how it compares to Apache GraphAR
+## More information about graph-std and Apache GraphAR
 
 [Blog Post](https://adsharma.github.io/graph-archiving/)
