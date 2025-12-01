@@ -5,7 +5,11 @@ This project provides tools to convert graph data from simple DuckDB databases o
 ## Converting to CSR Format
 
 ```bash
-uv run python convert_csr.py --source-db karate/karate_random.duckdb --output-db karate/karate_csr.duckdb --csr-table karate --schema  karate/karate_csr/schema.cypher
+uv run python convert_csr.py \
+--source-db karate/karate_random.duckdb \
+--output-db karate/karate_csr.duckdb \
+--csr-table karate \
+--schema karate/karate_csr/schema.cypher
 ```
 
 This will create a CSR representation with multiple tables depending on the number of node and edge types:
