@@ -23,4 +23,4 @@ This will create a CSR representation with multiple tables depending on the numb
 
 ## More information about graph-std and how it compares to Apache GraphAR
 
-[Blog Post] (https://adsharma.github.io/graph-archiving/)
+[Blog Post](https://adsharma.github.io/graph-archiving/)
