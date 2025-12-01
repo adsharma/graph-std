@@ -1,56 +1,13 @@
 # Graph Standard Formats
 
-This project provides tools to export various graphs from NetworkX to various standard graph formats, including CSR format for efficient processing.
-
-## Supported Graphs
-
-- Karate Club graph: A social network of friendships between 34 members of a karate club
-- Complete graph: A graph where every pair of distinct vertices is connected by a unique edge
-- Cycle graph: A graph that consists of a single cycle
-- Path graph: A graph whose vertices can be listed in an order such that the edges connect consecutive vertices
-- Kronecker graph: A scale-free graph with properties similar to Kronecker graphs
-
-## Usage
-
-To generate graph data in various formats, run:
-
-```bash
-python gen.py [--type TYPE] [--size SIZE] [--randomize-ids]
-```
-
-Options:
-- `--type`: Type of graph to generate (karate, complete, cycle, path, kronecker) - default: karate
-- `--size`: Size of the graph (number of nodes for applicable graph types)
-- `--randomize-ids`: Randomize node IDs in a space 10x the number of nodes
-
-This will generate five outputs:
-- `{prefix}_nodes.csv` and `{prefix}_edges.csv` - CSV format
-- `{prefix}.duckdb` - DuckDB database with nodes and edges tables
-- `{prefix}.snap` - SNAP format (edge list)
-- `{prefix}.snap.bin` - SNAP binary format (efficient binary format)
-- `{prefix}_kuzu` - KuzuDB database with nodes and edges tables
-
-Example for Karate Club graph:
-```bash
-python gen.py --type karate
-```
-
-Example for a randomized Karate Club graph:
-```bash
-python gen.py --type karate --randomize-ids
-```
-
-Example for a complete graph with 20 nodes:
-```bash
-python gen.py --type complete --size 20
-```
+This project provides tools to convert graph data from simple DuckDB databases or Parquet files containing `nodes_*` and `edges_*` tables, along with a `schema.cypher` file, into standardized graph formats for efficient processing.
 
 ## Converting to CSR Format
 
 To convert a DuckDB graph to Compressed Sparse Row (CSR) format for efficient processing:
 
 ```bash
-python convert_csr.py --source-db SOURCE_DB --output-db OUTPUT_DB [--csr-table TABLE_NAME] [--directed] [--test --limit LIMIT]
+uv run convert_csr.py --source-db SOURCE_DB --output-db OUTPUT_DB --schema path/to/schema.cypher [--csr-table TABLE_NAME] [--directed] [--test --limit LIMIT]
 ```
 
 Options:
@@ -60,60 +17,18 @@ Options:
 - `--directed`: Treat graph as directed (default: undirected)
 - `--test`: Run in test mode with limited data
 - `--limit`: Number of edges to use in test mode (default: 50000)
+- `--schema`: Path to schema.cypher for edge relationship info (FROM/TO node types)
 
 Example:
 ```bash
-python convert_csr.py --source-db karate_random.duckdb --csr-table karate_random --output-db karate_csr.db
+python convert_csr.py --source-db karate_random.duckdb --csr-table karate_random --output-db karate_csr.db --schema schema.cypher
 ```
 
-This will create a CSR representation with five tables:
-- `{table_name}_node_mapping`: Maps original node IDs to contiguous indices
-- `{table_name}_indptr`: Array of size N+1 for row pointers
-- `{table_name}_indices`: Array of size E containing column indices
-- `{table_name}_metadata`: Graph metadata (node count, edge count, directed flag)
-- `{table_name}_nodes`: Original nodes table with node attributes (if any)
+This will create a CSR representation with multiple tables depending on the number of node and edge types:
 
-This database can be further exported to a directory in parquet format as follows:
-
-```
-COPY database 'some-dir' (format 'parquet');
-```
-
-Proposal: use this directory as a standard for consuming graphs in other databases and applications.
-
-## Format Details
-
-### CSV
-Two CSV files are generated:
-- `{prefix}_nodes.csv`: Contains node IDs and their attributes (if any)
-- `{prefix}_edges.csv`: Contains source and target node IDs for each edge
-
-### DuckDB
-A DuckDB database with two tables:
-- `nodes`: Contains node_id and attributes (if any)
-- `edges`: Contains source and target columns
-
-### SNAP
-A text file with the SNAP format:
-- Comment lines starting with #
-- Each line represents an edge with source and target node IDs
-
-### SNAP Binary
-A binary file with the SNAP binary format:
-- Efficient binary representation of graph data
-- Contains header with graph metadata
-- Stores nodes and edges in a compact binary format
-- Supports optional node and edge attributes
-
-### KuzuDB
-A KuzuDB database with two tables:
-- `nodes`: Contains node_id (INT64) and attributes (if any) with node_id as primary key
-- `edges`: A relationship table connecting nodes to nodes
-
-### CSR (Compressed Sparse Row)
-A representation optimized for fast graph algorithms:
-- Node mapping: Maps original sparse node IDs to 0-based contiguous indices
-- Row pointers (indptr): For each node, points to the start of its edges in the indices array
-- Column indices (indices): Contains the target node for each edge
-- Metadata: Stores graph properties (node count, edge count, directed flag)
-- Nodes: Original nodes table with node attributes (if any), prefixed with the table name
+- `{table_name}_indptr_{edge_name}`: Array of size N+1 for row pointers (one per edge table)
+- `{table_name}_indices_{edge_name}`: Array of size E containing column indices (one per edge table)
+- `{table_name}_nodes_{node_name}`: Original nodes table with node attributes (one per node table)
+- `{table_name}_mapping_{node_name}`: Maps original node IDs to contiguous indices (one per node table)
+- `{table_name}_metadata`: Global graph metadata (node count, edge count, directed flag)
+- `schema.cypher`: A cypher schema that a graph database can mount without ingesting
