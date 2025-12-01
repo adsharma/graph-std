@@ -319,6 +319,14 @@ def create_csr_graph_to_duckdb(
     # Connect to a fresh DuckDB database for output
     con = duckdb.connect(output_db_path)
 
+    # Drop all existing tables to recreate from scratch
+    result = con.execute("SHOW TABLES").fetchall()
+    existing_tables = [row[0] for row in result]
+    for table in existing_tables:
+        con.execute(f"DROP TABLE IF EXISTS {table}")
+    if existing_tables:
+        print(f"Dropped {len(existing_tables)} existing tables")
+
     try:
         print("Step 0: Loading edges and nodes from original DB into new DB...")
 
